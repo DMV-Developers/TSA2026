@@ -17,6 +17,8 @@ using UnityEngine.UI;
 
 public class PrometeoCarController : MonoBehaviour
 {
+  private RespawnSystem respawnSystem;
+  
     //AI
     [Space(20)]
     [Header("AI")]
@@ -30,8 +32,18 @@ public class PrometeoCarController : MonoBehaviour
       
       
     public Transform aiTarget;
-    public float aiSteerSensitivity = 0.8f;
+    public float aiSteerSensitivity = 0.4f;
     public float aiMaxSpeed = 80f;
+    
+    [Header("AI Anti-Stuck System")]
+    public bool enableAntiStuck = true;
+    public float stuckDetectionTime = 2f;      // How long before considering stuck
+    public float unstuckReverseTime = 5f;      // How long to reverse
+    private bool isRecoveringFromStuck = false;
+    private float stuckTimer = 0f;
+    private float lastSpeed = 0f;
+    private Vector3 lastPosition;
+    private float unstuckTimer = 0f;
 
 
     //CAR SETUP
@@ -40,19 +52,19 @@ public class PrometeoCarController : MonoBehaviour
     //[Header("CAR SETUP")]
     [Space(10)]
     [Range(20, 190)]
-    public int maxSpeed = 90; //The maximum speed that the car can reach in km/h.
+    public int maxSpeed = 120; //The maximum speed that the car can reach in km/h.
     [Range(10, 120)]
     public int maxReverseSpeed = 45; //The maximum speed that the car can reach while going on reverse in km/h.
-    [Range(1, 10)]
-    public int accelerationMultiplier = 2; // How fast the car can accelerate. 1 is a slow acceleration and 10 is the fastest.
+    [Range(1, 100)]
+    public int accelerationMultiplier = 5; // How fast the car can accelerate. 1 is a slow acceleration and 10 is the fastest.
     [Space(10)]
     [Range(10, 45)]
-    public int maxSteeringAngle = 27; // The maximum angle that the tires can reach while rotating the steering wheel.
+    public int maxSteeringAngle = 40; // The maximum angle that the tires can reach while rotating the steering wheel.
     [Range(0.1f, 1f)]
     public float steeringSpeed = 0.5f; // How fast the steering wheel turns.
     [Space(10)]
     [Range(100, 600)]
-    public int brakeForce = 350; // The strength of the wheel brakes.
+    public int brakeForce = 600; // The strength of the wheel brakes.
     [Range(1, 10)]
     public int decelerationMultiplier = 2; // How fast the car decelerates when the user is not using the throttle.
     [Range(1, 10)]
@@ -277,6 +289,19 @@ public class PrometeoCarController : MonoBehaviour
       //in the inspector.
       carRigidbody = gameObject.GetComponent<Rigidbody>();
       carRigidbody.centerOfMass = bodyMassCenter;
+      
+      // POTENTIAL FIX?
+      // This aims to fix the whole "wheel tiling" problem
+      if (!isAI)
+      {
+        ConfigureWheelSuspension(frontLeftCollider);
+        ConfigureWheelSuspension(frontRightCollider);
+        ConfigureWheelSuspension(rearLeftCollider);
+        ConfigureWheelSuspension(rearRightCollider);
+      }
+      
+      respawnSystem = GetComponent<RespawnSystem>();
+
 
       //Initial setup to calculate the drift value of the car. This part could look a bit
       //complicated, but do not be afraid, the only thing we're doing here is to save the default
@@ -370,12 +395,22 @@ public class PrometeoCarController : MonoBehaviour
             Debug.LogWarning(ex);
           }
         }
+        
+        if (isAI && enableAntiStuck)
+        {
+          lastPosition = transform.position;
+        }
 
     }
 
     // Update is called once per frame
     void Update()
     {
+      
+      if (respawnSystem != null && respawnSystem.IsFrozen())
+      {
+        return;
+      }
 
       //CAR DATA
 
@@ -412,10 +447,10 @@ public class PrometeoCarController : MonoBehaviour
         }
 
         if(turnLeftPTI.buttonPressed){
-          TurnLeft();
+          TurnLeft(1);
         }
         if(turnRightPTI.buttonPressed){
-          TurnRight();
+          TurnRight(1);
         }
         if(handbrakePTI.buttonPressed){
           CancelInvoke("DecelerateCar");
@@ -453,10 +488,10 @@ public class PrometeoCarController : MonoBehaviour
           }
 
           if(isAPressed){
-            TurnLeft();
+            TurnLeft(1);
           }
           if(isDPressed){
-            TurnRight();
+            TurnRight(1);
           }
 
           if(isSpacePressed){
@@ -476,72 +511,124 @@ public class PrometeoCarController : MonoBehaviour
           }
         }
         else
+{
+    // ===== AI INPUT WITH ANTI-STUCK =====
+    if (aiTarget == null)
+    {
+        ThrottleOff();
+        ResetSteeringAngle();
+        return;
+    }
+
+    CancelInvoke(nameof(DecelerateCar));
+    deceleratingCar = false;
+
+    // ──── ANTI-STUCK DETECTION ────
+    if (enableAntiStuck && !isRecoveringFromStuck)
+    {
+        float distanceMoved = Vector3.Distance(transform.position, lastPosition);
+        float currentSpeed = Mathf.Abs(carSpeed);
+
+        // Check if car is stuck (not moving much despite throttle)
+        if (distanceMoved < 0.5f && currentSpeed < 3f && aiThrottle > 0.3f)
         {
-          // ===== AI INPUT =====
-          if (aiTarget == null)
-          {
-            ThrottleOff();
-            ResetSteeringAngle();
-            return;
-          }
+            stuckTimer += Time.deltaTime;
 
-          CancelInvoke(nameof(DecelerateCar));
-          deceleratingCar = false;
-
-          Vector3 localTarget = transform.InverseTransformPoint(aiTarget.position);
-          float distance = localTarget.magnitude;
-
-          // ──── REVERSE DETECTION ────
-          bool targetBehind = localTarget.z < -2f;
-
-          // ──── STEERING DECISION ────
-          if (distance > 0.5f)
-          {
-            float targetAngle = Mathf.Atan2(localTarget.x, localTarget.z) * Mathf.Rad2Deg;
-            aiSteer = Mathf.Clamp((targetAngle / maxSteeringAngle) * aiSteerSensitivity, -1f, 1f);
-          }
-          else
-          {
-            aiSteer = 0f;
-          }
-
-          // ──── THROTTLE DECISION ────
-          float steerAmount = Mathf.Abs(aiSteer);
-    
-          aiThrottle = 1f;
-    
-          if (steerAmount > 0.7f)
-            aiThrottle = 0.4f;
-          else if (steerAmount > 0.4f)
-            aiThrottle = 0.7f;
-    
-          if (distance < 10f)
-            aiThrottle *= Mathf.Max(0.2f, distance / 10f); // ← FIX: Never stall
-    
-          if (carSpeed > aiMaxSpeed)
-            aiThrottle = 0f;
-
-          // ──── APPLY DECISIONS ────
-          if (targetBehind)
-          {
-            GoReverse(); // ← FIX: Handle target behind
-          }
-          else if (aiThrottle > 0.1f)
-          {
-            GoForward();
-          }
-          else
-          {
-            ThrottleOff();
-          }
-
-          if (aiSteer > 0.05f)
-            TurnRight();
-          else if (aiSteer < -0.05f)
-            TurnLeft();
-          else
-            ResetSteeringAngle();
+            if (stuckTimer >= stuckDetectionTime)
+            {
+                // Car is stuck! Start recovery
+                Debug.Log("AI Car is STUCK! Starting recovery...");
+                isRecoveringFromStuck = true;
+                unstuckTimer = 0f;
+                stuckTimer = 0f;
+            }
         }
+        else
+        {
+            // Car is moving fine, reset stuck timer
+            stuckTimer = 0f;
+        }
+
+        lastPosition = transform.position;
+    }
+
+    // ──── UNSTUCK BEHAVIOR ────
+    if (isRecoveringFromStuck)
+    {
+        unstuckTimer += Time.deltaTime;
+
+        // Reverse while turning left for specified time
+        GoReverse();
+        TurnLeft(1f);
+
+        if (unstuckTimer >= unstuckReverseTime)
+        {
+            // Recovery complete, resume normal operation
+            Debug.Log("AI Car recovery complete! Resuming normal behavior.");
+            isRecoveringFromStuck = false;
+            unstuckTimer = 0f;
+            stuckTimer = 0f;
+            lastPosition = transform.position;
+        }
+
+        return; // Skip normal AI logic during recovery
+      }
+
+      // ──── NORMAL AI BEHAVIOR ────
+      Vector3 localTarget = transform.InverseTransformPoint(aiTarget.position);
+      float distance = localTarget.magnitude;
+
+      // ──── REVERSE DETECTION ────
+      bool targetBehind = localTarget.z < -2f;
+
+      // ──── STEERING DECISION ────
+      if (distance > 0.05f)
+      {
+          float targetAngle = Mathf.Atan2(localTarget.x, localTarget.z) * Mathf.Rad2Deg;
+          aiSteer = Mathf.Clamp((targetAngle / maxSteeringAngle) * aiSteerSensitivity, -1f, 1f);
+      }
+      else
+      {
+          aiSteer = 0f;
+      }
+
+      // ──── THROTTLE DECISION ────
+      float steerAmount = Mathf.Abs(aiSteer);
+
+      aiThrottle = 1f;
+
+      if (steerAmount > 0.7f)
+          aiThrottle = 0.4f;
+      else if (steerAmount > 0.4f)
+          aiThrottle = 0.7f;
+
+      if (distance < 10f)
+          aiThrottle *= Mathf.Max(0.2f, distance / 10f);
+
+      if (carSpeed > aiMaxSpeed)
+          aiThrottle = 0f;
+
+      // ──── APPLY DECISIONS ────
+      if (targetBehind)
+      {
+          GoReverse();
+      }
+      else if (aiThrottle > 0.1f)
+      {
+          GoForward();
+      }
+      else
+      {
+          ThrottleOff();
+      }
+
+      if (aiSteer > 0f)
+          TurnRight(Mathf.Abs(aiSteer));
+      else if (aiSteer < 0f)
+          TurnLeft(Mathf.Abs(aiSteer));
+      else
+          ResetSteeringAngle();
+  }
 
       }
 
@@ -603,25 +690,25 @@ public class PrometeoCarController : MonoBehaviour
     //
 
     //The following method turns the front car wheels to the left. The speed of this movement will depend on the steeringSpeed variable.
-    public void TurnLeft(){
+    public void TurnLeft(float amount){
       steeringAxis = steeringAxis - (Time.deltaTime * 10f * steeringSpeed);
       if(steeringAxis < -1f){
         steeringAxis = -1f;
       }
       var steeringAngle = steeringAxis * maxSteeringAngle;
-      frontLeftCollider.steerAngle = Mathf.Lerp(frontLeftCollider.steerAngle, steeringAngle, steeringSpeed);
-      frontRightCollider.steerAngle = Mathf.Lerp(frontRightCollider.steerAngle, steeringAngle, steeringSpeed);
+      frontLeftCollider.steerAngle = Mathf.Lerp(frontLeftCollider.steerAngle, steeringAngle * amount, steeringSpeed);
+      frontRightCollider.steerAngle = Mathf.Lerp(frontRightCollider.steerAngle, steeringAngle * amount, steeringSpeed);
     }
 
     //The following method turns the front car wheels to the right. The speed of this movement will depend on the steeringSpeed variable.
-    public void TurnRight(){
+    public void TurnRight(float amount){
       steeringAxis = steeringAxis + (Time.deltaTime * 10f * steeringSpeed);
       if(steeringAxis > 1f){
         steeringAxis = 1f;
       }
       var steeringAngle = steeringAxis * maxSteeringAngle;
-      frontLeftCollider.steerAngle = Mathf.Lerp(frontLeftCollider.steerAngle, steeringAngle, steeringSpeed);
-      frontRightCollider.steerAngle = Mathf.Lerp(frontRightCollider.steerAngle, steeringAngle, steeringSpeed);
+      frontLeftCollider.steerAngle = Mathf.Lerp(frontLeftCollider.steerAngle, steeringAngle * amount, steeringSpeed);
+      frontRightCollider.steerAngle = Mathf.Lerp(frontRightCollider.steerAngle, steeringAngle * amount, steeringSpeed);
     }
 
     //The following method takes the front car wheels to their default position (rotation = 0). The speed of this movement will depend
@@ -950,6 +1037,28 @@ public class PrometeoCarController : MonoBehaviour
 
         driftingAxis = 0f;
       }
+    }
+    
+    void ConfigureWheelSuspension(WheelCollider wheel)
+    {
+      // Stiffen suspension to prevent body roll
+      JointSpring suspensionSpring = wheel.suspensionSpring;
+      suspensionSpring.spring = 35000f;      // Much stiffer spring
+      suspensionSpring.damper = 4500f;       // Higher damping
+      suspensionSpring.targetPosition = 0.5f;
+      wheel.suspensionSpring = suspensionSpring;
+    
+      // Reduce suspension travel
+      wheel.suspensionDistance = 0.3f;       // Shorter travel = less body roll
+    
+      // Improve tire grip
+      WheelFrictionCurve forwardFriction = wheel.forwardFriction;
+      forwardFriction.stiffness = 1.5f;
+      wheel.forwardFriction = forwardFriction;
+    
+      WheelFrictionCurve sidewaysFriction = wheel.sidewaysFriction;
+      sidewaysFriction.stiffness = 1.5f;
+      wheel.sidewaysFriction = sidewaysFriction;
     }
 
 }

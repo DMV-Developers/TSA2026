@@ -27,6 +27,5 @@ public class CameraFollow : MonoBehaviour {
 			newx = 0.0f;
 
 		follow.ShoulderOffset.x = Mathf.SmoothDamp(follow.ShoulderOffset.x, newx, ref currentVelocity, 0.5f);
-		Debug.Log(newx);
     }
 }
