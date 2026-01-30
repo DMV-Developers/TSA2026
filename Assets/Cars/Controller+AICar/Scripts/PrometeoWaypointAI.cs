@@ -39,6 +39,7 @@ public class PrometeoWaypointAI : MonoBehaviour
     [Header("Spline Path (UNDER DEVELOPMENT)")]
     public SplineContainer splineContainer;
     public Mesh SphereMesh;
+    public bool showGeneratedPoints = false;
 
     // Private variables
     private PrometeoCarController carController;
@@ -95,9 +96,11 @@ public class PrometeoWaypointAI : MonoBehaviour
         {
             GameObject waypointObj = new GameObject($"wp_{i}");
             waypointObj.transform.position = pathPoints[i];
-            waypointObj.transform.parent = waypointContainer; // Parent to this object
+            waypointObj.transform.parent = waypointContainer;
             waypointObj.AddComponent<MeshRenderer>();
             waypointObj.AddComponent<MeshFilter>().mesh = SphereMesh;
+            waypointObj.SetActive(showGeneratedPoints);
+
             waypoints[i] = waypointObj.transform;
         }
         Debug.Log($"PrometeoWaypointAI: Loaded {numberOfSamples} waypoints from container '{waypointContainer.name}'");
